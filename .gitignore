@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 backend/server.log
 .neon
+# Neon CLI / AI agent generated files
+.agents/
+skills-lock.json
+.neon/
