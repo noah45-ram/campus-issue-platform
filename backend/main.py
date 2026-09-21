@@ -6,6 +6,7 @@ from uuid import uuid4
 from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 load_dotenv(find_dotenv())
@@ -34,6 +35,14 @@ app = FastAPI(
     title="GreenCampus Sentinel API",
     description="AI-assisted campus sustainability issue reporting platform",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Initialize PostgreSQL tables.
