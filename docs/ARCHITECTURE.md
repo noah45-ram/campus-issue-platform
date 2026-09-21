@@ -29,9 +29,9 @@
           │                  │                  │
 ┌─────────▼──────┐  ┌────────▼───────┐  ┌──────▼──────────────────────┐
 │  Primary DB    │  │   AI Layer     │  │   File Storage              │
-│  PostgreSQL    │  │  (AI Service)  │  │   (local / object store)    │
-│  or MongoDB    │  └────────┬───────┘  └─────────────────────────────┘
-└────────────────┘           │
+│  PostgreSQL    │  │  (AI Service)  │  │   (local filesystem)        │
+└────────────────┘  └────────┬───────┘  └─────────────────────────────┘
+                             │
                     ┌────────▼───────┐
                     │   ChromaDB     │
                     │  (RAG vector   │
@@ -44,14 +44,13 @@
 ## 2. Frontend
 
 ### 2.1 Technology
-- Framework: TBD — options include plain HTML/JS with a lightweight framework (e.g., HTMX, Vue.js, or React)
-- Priority constraints on framework choice:
-  - Must be free/open-source
-  - Must be mobile-responsive without requiring a native app
-  - Must support accessible, large-control UI design
-  - Must not require a paid build pipeline
+- **Framework: React (with Vite as the build tool)**
+- Free and open-source; no paid build pipeline required
+- Mobile-first, responsive — no native app install required
+- Supports accessible, large-control UI design
+- Communicates with the FastAPI backend exclusively via REST API
 
-> **Assumption:** The frontend framework will be decided at the start of development based on developer familiarity. The architecture is backend-first; the frontend can adapt to any REST API.
+> **Decision finalized:** React + Vite is the MVP frontend. This decision is not subject to further change without explicit approval. The architecture is backend-first; the frontend must conform to the REST API contract defined in Section 3.
 
 ### 2.2 Key UI Views
 
@@ -135,9 +134,14 @@ campus-issue-platform/
 
 ### 4.1 Primary Database
 
-**Choice to finalize at development start:** PostgreSQL (preferred for relational integrity, reporting queries) or MongoDB (preferred for flexible document schemas).
+**PostgreSQL** is the sole database for the MVP.
 
-> **Assumption:** PostgreSQL is the default preference based on the need for structured relational queries in the analytics and maintenance queue views. If document flexibility is needed for issue metadata, a hybrid approach or JSON columns in PostgreSQL will be used rather than introducing a second database unnecessarily.
+- Provides the relational integrity required for issue, report, location, alert, and user entities
+- Supports JSONB columns for flexible AI output storage without needing a second database
+- Native support for the aggregation queries used in admin analytics and maintenance queue prioritization
+- Free and open-source; runs in Docker for both development and deployment
+
+MongoDB is **not** used in the MVP. If future requirements create a genuine need for a document store, this decision must be revisited explicitly and justified. JSON columns in PostgreSQL are the preferred approach for any flexible metadata storage within the prototype.
 
 ### 4.2 Core Data Entities
 
@@ -217,11 +221,9 @@ The AI layer is a service within the FastAPI backend (`ai_service.py`) that:
 > **Requirement:** The chosen LLM must have a free-tier or fully open-source/local option. Any switch to a paid model must be explicitly approved.
 
 ### 5.2 LangGraph Usage
-LangGraph may be used where a multi-step agentic pipeline provides real value:
-- Duplicate detection (compare → score → merge/create)
-- RAG retrieval → response generation pipeline
+LangGraph is **not** used for duplicate detection. Duplicate detection is plain deterministic Python/business logic (see Section 13).
 
-LangGraph will **not** be used just for the sake of using it. Simple sequential logic in Python is preferred where LangGraph adds no meaningful benefit.
+LangGraph may be used for the RAG retrieval → response generation pipeline if a multi-step structure provides clear value. It must not be used to add architectural complexity where simple sequential Python achieves the same result.
 
 ---
 
@@ -256,6 +258,12 @@ Campus Documents (PDF / text)
 - Retrieved source chunks are tagged with their source document and section
 - Generated responses that use retrieved content must indicate this to the user
 
+### 6.6 RAG Fallback Behaviour
+- If ChromaDB returns no relevant chunks for a query, the system must not fabricate a campus policy citation
+- The response must clearly state that it is based on general guidance rather than campus-specific policy
+- Example label: _"Based on general sustainability guidance — no campus-specific policy was found for this issue."_
+- RAG service unavailability must be logged; the report submission must not be blocked; a safe degraded response is returned
+
 ---
 
 ## 7. File / Image Handling
@@ -266,16 +274,17 @@ User uploads photo
   → Backend receives file (multipart/form-data)
   → Validates file type (JPEG, PNG, HEIC — mobile-friendly)
   → Validates file size (limit TBD, suggest ≤ 10MB)
-  → Stores temporarily in local file storage or configured object store
+  → Stores temporarily on local filesystem with generated ID as filename
   → Passes image to AI service for classification
-  → After classification complete: deletes file from storage
-  → If audit retention required (safety-critical cases): stores in restricted audit path
+  → After classification complete: file is deleted from local storage
+  → If audit retention required (safety-critical cases): file is moved to a
+    restricted local audit path with access controls; retained for a defined period only
 ```
 
 ### 7.2 Storage
-- **Development:** Local filesystem
-- **Production:** Object store with free tier preferred (e.g., MinIO self-hosted, or similar)
-- **No mandatory paid object store** (e.g., AWS S3 is not required)
+- **MVP / Prototype:** Local filesystem only — no external object store is used or required
+- **Production (future scope):** A self-hosted or free-tier object store may be introduced; MinIO is a candidate but is not part of the prototype
+- **No mandatory paid object store** at any stage (e.g., AWS S3 is not required)
 
 ### 7.3 Security
 - File names are sanitized and replaced with generated IDs
@@ -305,6 +314,11 @@ User uploads photo
 - Default role on registration: Reporter
 - Role escalation (Maintenance / Admin): manual process by Admin — not self-service
 - Role is verified server-side on every protected request
+
+### 8.4 Prototype / Demo Accounts
+- The MVP must support seeded demo accounts for each role (Reporter, Maintenance, Admin)
+- Seeded accounts are used for demonstration, testing, and prototype evaluation
+- No OAuth, SSO, or complex external identity integration is required or permitted in the MVP
 
 ---
 
@@ -341,16 +355,25 @@ Maintenance staff marks issue as Resolved
 ## 10. Maintenance Workflow (System Perspective)
 
 ```
-1. Report submitted
-2. AI classification runs (async where possible to avoid blocking user)
-3. Duplicate check runs
-4. Issue created or existing issue updated (report count++)
-5. Priority score computed (rule-based + AI inputs)
-6. Issue appears in maintenance queue at correct priority position
-7. Staff reviews and acts
-8. Staff updates status (Open → In Progress → Resolved)
-9. On Resolved: alert deactivated; historical record updated
+1.  Report submitted (photo + text + location)
+2.  AI classification runs — synchronous (user waits for result)
+3.  Deterministic safety rules applied — synchronous
+4.  Duplicate detection runs — synchronous
+5.  RAG retrieval runs — synchronous (result needed before user response is sent)
+6.  Quick Action OR Safety Alert generated — synchronous
+7.  Response returned to user
+8.  Issue created or existing issue updated (report_count++) — written to DB
+9.  Alert record created or updated — written to DB
+10. Priority score computed — synchronous with issue write
+11. Issue appears in maintenance queue at correct priority position
+12. [Background] AI summary updated if new reports are grouped to an existing issue
+13. Staff reviews and acts
+14. Staff updates status (Open → In Progress → Resolved)
+15. On Resolved: alert deactivated; historical record updated
 ```
+
+> Steps 1–10 must complete before the response is shown to the user. Step 12 is the only step permitted to run as a background task because it does not affect the reporter's immediate response.
+
 
 ### Priority Score Computation
 Priority is computed deterministically from:
@@ -380,35 +403,68 @@ No real-time data pipeline is required for MVP — standard DB aggregation queri
 ## 12. Docker Architecture
 
 ```yaml
-# docker-compose.yml (planned structure)
+# docker-compose.yml (planned structure — MVP)
 services:
-  app:           # FastAPI backend
-  db:            # PostgreSQL (or MongoDB)
-  chromadb:      # ChromaDB vector store
-  storage:       # MinIO (optional, for object storage in production)
-  # AI models (Ollama) may run as a sidecar or external service
+  app:           # FastAPI backend (Python)
+  db:            # PostgreSQL
+  chromadb:      # ChromaDB vector store (RAG)
+  # Ollama may run as a sidecar or external local service for development
+  # MinIO and other object stores are NOT part of the MVP
 ```
 
-- All services are containerized
+- All MVP services are containerized
 - Environment variables managed via `.env` files — never committed to Git
 - Development and production docker-compose files are kept separate
+- File storage in the MVP uses a local Docker volume mounted to the `app` container
 
 ---
 
 ## 13. Data Flow Summary
 
+### 13.1 Report Submission Flow (Synchronous)
+
 ```
 [User] → submits report (text + image + location)
-  → [FastAPI] validates input
-  → [AI Service] classifies (category, severity, suggested action)
-  → [Safety Rules] validate and override if necessary
-  → [Duplicate Service] checks for existing issues
-  → [DB] creates or updates issue record
-  → [RAG Service] retrieves relevant guidance (async)
-  → [FastAPI] returns response to user (quick action or safety alert)
-  → [Alert Service] creates/updates alert record
-  → [DB] alert becomes visible to location-matched users
+  → [FastAPI] validates input (Pydantic; file type/size check)
+  → [AI Service] classifies: category, severity, key attributes, suggested action
+  → [Safety Rules] apply deterministic guardrails; override AI output if safety flag triggered
+  → [Duplicate Service] hard-filter by location + category + time window;
+                        score semantic similarity + attribute overlap;
+                        result: link to existing issue OR create new issue
+  → [RAG Service] retrieve relevant campus guidance from ChromaDB;
+                  if no match: prepare general-guidance fallback response
+  → [Response Builder] assemble Quick Action OR Safety Alert with source attribution
+  → [FastAPI] returns response to user ← USER SEES RESPONSE HERE
+  → [DB] issue created or updated (report_count++); alert created or updated
 ```
+
+### 13.2 Duplicate Detection Logic (Deterministic Python)
+
+```
+Candidate issues = open issues WHERE location = report.location
+                                AND category ≈ report.category
+                                AND created_at within time window
+
+For each candidate:
+  → score = semantic_similarity(report.description, candidate.description)
+           + attribute_overlap(report.attributes, candidate.attributes)
+
+If any candidate scores above threshold → likely duplicate → link report
+Otherwise → create new issue
+
+Maintenance staff can always manually merge or separate issues.
+```
+
+> **Note:** Duplicate grouping uses evidence (similarity + attributes) as a confidence signal — not a strict all-signals-must-agree gate. A report that clearly matches location, category, time window, and has high similarity is grouped even if minor attribute details differ. The threshold is configurable and will be tuned during testing.
+
+### 13.3 Architectural Principle
+
+> **AI suggests and classifies.**
+> **Deterministic safety and priority rules protect users and enforce system decisions.**
+> **The system routes and surfaces issues.**
+> **Human maintenance staff control operational resolution.**
+
+No AI output takes operational effect without passing through deterministic rule validation first. No issue is resolved, merged, or closed without explicit action by a human maintenance staff member or administrator.
 
 ---
 
@@ -426,4 +482,4 @@ services:
 | Rate limiting | Applied to report submission and upload endpoints (MVP: simple middleware) |
 | Photo retention | Temporary files purged; no unnecessary retention |
 | Personal data | Minimal collection; no face recognition; no profiling |
-| Audit logging | AI decisions and status changes logged with timestamps |
+| Audit logging | AI decisions, rule triggers, confidence metadata, and resulting actions logged; audit logs must not unnecessarily store personally identifying information |

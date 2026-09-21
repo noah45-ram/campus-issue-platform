@@ -13,17 +13,20 @@
 
 AI is used as an **assistive layer** — not as the system's decision-maker. Every AI-generated output either informs a human decision or is validated by deterministic rules before affecting system behavior.
 
-| What AI Does | What AI Does NOT Do |
+| What AI (LLM) Does | What AI Does NOT Do |
 |---|---|
-| Classify issue category | Set final safety classification alone |
-| Suggest severity | Override rule-based safety guardrails |
-| Generate quick action suggestions | Provide DIY repair instructions for hazardous issues |
+| Classify issue category from text + image (LLM classification) | Set final safety classification alone |
+| Suggest severity | Override deterministic safety guardrails |
+| Generate quick action suggestion text | Provide DIY repair instructions for hazardous issues |
 | Generate safety alert text | Make autonomous decisions about maintenance routing |
-| Summarize multiple reports | Determine final priority score (only contributes to it) |
-| Detect likely duplicates (similarity scoring) | Merge or close issues without human confirmation |
-| Retrieve relevant guidance via RAG | Fabricate campus policy it has not retrieved |
-| Analyze uploaded images | Identify people, faces, or personal attributes |
-| Surface recurring patterns | Guarantee 100% accuracy in any of the above |
+| Summarize multiple reports for maintenance staff | Determine final priority score (only contributes `suggested_severity`) |
+| Extract structured issue attributes and semantic embeddings for use by the duplicate service | Autonomously decide that two reports are duplicates |
+| Retrieve relevant campus guidance via RAG | Fabricate campus policy it has not retrieved |
+| Analyze uploaded images for issue indicators | Identify people, faces, or personal attributes |
+| Surface recurring patterns from historical data | Guarantee 100% accuracy in any of the above |
+| **Deterministic duplicate service** performs candidate filtering and comparison | _(Not an LLM function)_ |
+| **Deterministic safety rules** (`safety_rules.py`) enforce final safety classification | _(Not an LLM function)_ |
+| **Deterministic priority calculation** (`priority.py`) computes final priority score | _(Not an LLM function)_ |
 
 ---
 
@@ -38,17 +41,23 @@ AI is used as an **assistive layer** — not as the system's decision-maker. Eve
 
 ```
 Input received
-  → Multimodal AI call: text + image → structured classification output
-  → Output fields:
-      - category (from predefined enum)
-      - suggested_severity (Low / Medium / High / Critical)
-      - safety_concern (boolean)
-      - safety_concern_reason (brief text if flagged)
-      - suggested_quick_action (text, only if not safety-critical)
-      - confidence_score (optional, for internal logging)
-  → Rule-based safety guardrails applied (see Section 7)
+  → [LLM classification] Multimodal call: text + image → structured output:
+        - category (from predefined enum)
+        - suggested_severity (Low / Medium / High / Critical)
+        - safety_concern (boolean)
+        - safety_concern_reason (brief text if flagged)
+        - suggested_quick_action (text — candidate only, not yet approved)
+        - extracted_attributes (key issue indicators: fixture type, damage type, etc.)
+        - confidence_score (for internal logging and fallback handling)
+  → [Deterministic safety guardrails] safety_rules.py validates and may override:
+        - category escalated if keyword or category rule triggers
+        - suggested_quick_action discarded if safety flag set
+        - safety_flag and safety_level written to record
   → Final category and safety_flag written to Issue record
 ```
+
+> The LLM produces candidate outputs. `safety_rules.py` always runs after LLM classification and may override any safety-relevant field. The LLM cannot bypass this step.
+
 
 ### 2.3 Predefined Category Enum (Draft — subject to refinement)
 
@@ -101,36 +110,79 @@ Input received
 ## 4. Duplicate Detection
 
 ### 4.1 Rationale
-Multiple users often report the same issue independently. Creating separate tickets for the same physical issue wastes maintenance effort and obscures true impact.
+Multiple users often report the same issue independently. Creating separate tickets for the same physical issue wastes maintenance effort and obscures true impact. The goal is to group likely-same reports without incorrectly merging distinct issues.
 
-### 4.2 Approach (Rule + Similarity Hybrid)
+### 4.2 Responsibilities: LLM vs Deterministic Service
+
+The LLM and the deterministic duplicate service have strictly separate roles:
+
+| Step | Responsible Component |
+|---|---|
+| Extract structured issue attributes from text + image | LLM (during classification — `extracted_attributes` field) |
+| Generate semantic embedding of report description | Embedding model (local, separate from LLM call) |
+| Filter candidate issues by location, category, time window | Deterministic duplicate service (Python business logic) |
+| Score semantic similarity against candidates | Deterministic duplicate service (cosine similarity on embeddings) |
+| Compare structured attribute overlap | Deterministic duplicate service (Python logic) |
+| Decide: link to existing issue OR create new issue | Deterministic duplicate service |
+| Manually merge or separate issues | Maintenance staff |
+
+The LLM does **not** decide whether two reports are duplicates. It only provides inputs (attributes, embedding) that the deterministic service uses.
+
+### 4.3 Algorithm
 
 ```
-New report submitted with (location_id, category, description, image classification output)
+New report submitted with (location_id, category, description, extracted_attributes)
 
-Step 1 — Hard filter:
-  → Query open issues WHERE location_id = report.location_id AND category = report.category
-  → If none found → skip to Step 3 (create new issue)
+─── PHASE 1: HARD FILTERS (all must pass — each is a disqualifying condition) ───
 
-Step 2 — Similarity scoring:
-  → For each candidate issue in Step 1:
-      - Text similarity: embed report description + existing issue descriptions → cosine similarity
-      - Keyword overlap: extract key indicators from AI classification outputs → overlap score
-      - Time proximity: reports within a configurable time window score higher
-      - Combine scores into a weighted similarity score
-  → If score > threshold (TBD, suggest 0.75 initially): flag as likely duplicate
+  Filter 1 — Location:
+    Candidate issues must have location_id = report.location_id
+    (A report in H5 is never a duplicate of a report in H4, regardless of any other signal)
 
-Step 3 — Decision:
-  → Similarity above threshold → link report to existing issue; increment report_count
-  → Similarity below threshold → create new issue
-  → Maintenance staff can always manually merge or separate
+  Filter 2 — Category:
+    Candidate issues must have category compatible with report.category
+    (A WATER issue is not a duplicate of a WASTE issue)
+
+  Filter 3 — Time window:
+    Candidate issues must have status = OPEN AND created_at within configured window
+    (A resolved issue from last month at the same location is a recurring pattern,
+     not the same active issue — a new record is created; historical link preserved)
+
+  → If no candidates survive all three filters → create new issue record → DONE
+
+─── PHASE 2: EVIDENCE SCORING (candidates that passed all hard filters) ───
+
+  For each surviving candidate:
+    - semantic_similarity = cosine_similarity(
+          embed(report.description), embed(candidate.description)
+      )
+    - attribute_overlap = overlap_score(
+          report.extracted_attributes, candidate.extracted_attributes
+      )
+    - evidence_score = weighted_combination(semantic_similarity, attribute_overlap)
+
+  → If any candidate's evidence_score ≥ threshold:
+      link report to highest-scoring candidate; increment report_count
+  → Otherwise:
+      create new issue record
+
+─── PHASE 3: STAFF CONTROL ───
+
+  Maintenance staff can always:
+    - Manually merge two issues (link a report to a different parent issue)
+    - Manually split a grouped issue (move a report to a new issue)
+  All manual overrides are logged for audit.
 ```
 
-### 4.3 Important Constraint
-- Two issues at different locations (e.g., H4 vs. H5) must **never** be merged regardless of similarity score
-- Location is a hard filter, not a soft factor
+### 4.4 Key Constraints
 
-### 4.4 Staff Override
+- **Location is a hard filter, not a weighted signal.** A different location always produces a separate issue.
+- **Category compatibility is a hard filter.** Unrelated categories are never merged.
+- **Time window is a hard filter.** An issue that falls outside the active window is not a duplicate — it may be a recurrence of a prior resolved issue.
+- **Evidence scoring is a confidence mechanism, not a strict gate.** A report that clearly matches on location, category, time window, and has strong similarity is grouped even if minor attribute details differ. The threshold is configurable and will be tuned during testing.
+- **The LLM does not determine the duplicate decision.** It extracts attributes used as inputs to the deterministic service.
+
+### 4.5 Staff Override
 - Maintenance staff can manually merge issues (link a report to a different parent issue)
 - Maintenance staff can manually split issues (move a report to a new issue)
 - These overrides are logged for audit
@@ -169,14 +221,25 @@ Issue report classification complete
 ```
 
 ### 5.4 Attribution and Transparency
-- Any response that uses retrieved content must include a note such as:
-  _"Based on campus sustainability guidelines."_
+- Any response that uses retrieved content must include a label such as:
+  _"Based on campus sustainability guidelines [Source: {document name}]."_
 - Source document name must be logged and available for audit
-- AI-generated content not grounded in retrieved documents must be visually distinguished
+- AI-generated content not grounded in retrieved documents must be visually distinguished from policy-grounded content
 
-### 5.5 RAG Failure Handling
-- If ChromaDB returns no relevant chunks: fall back to a safe, general guidance response
-- If RAG service is unavailable: log the failure; return a degraded but safe response; do not block issue submission
+### 5.5 RAG Fallback Behaviour
+
+**When no relevant campus source is retrieved:**
+- The system must NOT fabricate a campus policy citation
+- The system must NOT imply that a general suggestion is an official campus policy
+- The response must be clearly labeled, for example:
+  > _"Based on general sustainability guidance — no relevant campus-specific policy was found for this issue."_
+- The response may still provide safe general guidance; it must simply be labeled accurately
+
+**When ChromaDB is unavailable:**
+- The failure is logged
+- Issue submission continues and is not blocked
+- A safe, labeled general guidance response is returned
+- The label must indicate the response is not campus-policy-grounded
 
 ---
 
@@ -287,6 +350,9 @@ Safety guardrails are implemented as deterministic code, not as LLM instructions
 - Checks category against the safety rule map
 - Returns: `{ safety_flag: bool, safety_level: str, override_applied: bool }`
 - Is called before any AI-generated quick action is allowed through
+
+> **Safety rules are never bypassed.** `safety_rules.py` runs on every classification result, whether that result came from the LLM or from the keyword/rule-based fallback used when the LLM is unavailable. The LLM being unavailable does not reduce the level of safety protection — it may only reduce classification richness.
+
 
 ### 9.3 Override Behavior
 ```

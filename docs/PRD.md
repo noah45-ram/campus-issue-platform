@@ -149,16 +149,26 @@ Staff logs in
 
 ```
 New report submitted
-  → System extracts: location, category, key indicators from text + image
-  → Compares against open issues at same location within recent time window
-  → If similarity score exceeds threshold:
-    → Links new report to existing issue
-    → Increments report count
-    → Alerts maintenance staff that existing issue now has N reports
-  → If no match:
-    → Creates new issue
-  → Maintenance staff can manually merge or separate issues
+  → System extracts: location, category, key issue attributes (from text + image AI output)
+  → Hard filter: only open issues at the SAME location and SAME category are considered
+    (different location = always a separate issue, regardless of any other similarity)
+  → Time window check: only issues reported within a configurable recent window are candidates
+    (a report from last month at the same location may indicate a RECURRING issue,
+     not the same active issue — see Recurring Issues note below)
+  → Semantic similarity scored against candidate issues using extracted attributes + description
+  → Duplicate decision requires ALL of:
+      - Matching location (hard requirement)
+      - Matching or closely related category (hard requirement)
+      - Within the time window (hard requirement)
+      - Semantic similarity above threshold
+      - Consistent key attributes (e.g., same fixture type, same floor area if determinable)
+  → If all conditions met: link report to existing issue; increment report_count
+  → If any hard condition fails: create new issue record
+  → Maintenance staff can always manually merge or separate issues
 ```
+
+> **Recurring Issues:** If the same location and category produce a new report after the prior issue was resolved, the system creates a new issue record rather than reopening the old one. The historical relationship between the old and new issue is preserved for admin analytics to surface recurring patterns.
+
 
 ### 6.4 Alert Lifecycle
 
@@ -178,7 +188,7 @@ Campus-wide critical alert → Shown to all users regardless of location filter
 - FR-02: Location selection must be structured (campus area → building → floor/zone) and required.
 - FR-03: The system must classify the issue into a predefined category set automatically.
 - FR-04: The system must assign a severity and safety-level flag, with rule-based guardrails for critical categories.
-- FR-05: The system must detect likely duplicates before creating a new issue record.
+- FR-05: The system must detect likely duplicates before creating a new issue record. Reports must not be merged based on semantic similarity alone. A duplicate determination requires all of the following signals to agree: matching location, matching or closely related category, submission within a configurable time window, semantic similarity above threshold, and consistent key issue attributes extracted from the report.
 - FR-06: For every submitted report, users must receive a response: either a quick action suggestion or a safety alert.
 
 ### 7.2 Alerts
@@ -202,7 +212,7 @@ Campus-wide critical alert → Shown to all users regardless of location filter
 
 ### 7.5 AI Behavior
 - FR-20: AI must never provide DIY repair instructions for safety-critical issues.
-- FR-21: AI must source recommendations from the campus knowledge base (RAG) where applicable and distinguish them from generated content.
+- FR-21: AI must source recommendations from the campus knowledge base (RAG) where applicable and distinguish them from generated content. If no relevant verified campus source is retrieved, the system must clearly indicate that the response is based on general guidance rather than campus-specific policy. The system must never invent or imply that general guidance is an official campus policy.
 - FR-22: Rule-based guardrails must override AI classification for defined critical hazard categories.
 - FR-23: AI contributions must be transparently indicated in the interface.
 
@@ -211,11 +221,22 @@ Campus-wide critical alert → Shown to all users regardless of location filter
 - FR-25: User identities must not be exposed in aggregated views or public-facing output.
 - FR-26: The system must not collect unnecessary personal information.
 
+### 7.7 Accessibility
+- FR-27: Users with different levels of technical ability must be able to submit a basic report with minimal typing. The reporting interface must support this through:
+  - Large, clear visual controls (tap targets sized for mobile use)
+  - Predefined issue category selection (no free-text category entry required)
+  - Structured location selection (hierarchical dropdowns or equivalent; no manual address entry)
+  - Photo capture or upload as a primary reporting method (description text is optional when a photo is provided)
+  - Plain-language instructions at each step with no technical jargon
+- FR-28: Voice input may be considered as a future enhancement (see Section 9) and must not be required for basic report submission in the MVP.
+
 ---
 
 ## 8. MVP Scope
 
 The Minimum Viable Product must include:
+
+> **Prototype Constraint:** The MVP may use seeded or demo campus locations, sample reports, and a limited campus knowledge base sufficient to demonstrate the core workflows. Production-scale data integrations, live campus system connections, and full knowledge base population are outside the prototype scope.
 
 | # | Feature | Priority |
 |---|---|---|
@@ -279,4 +300,4 @@ The following features are **explicitly deferred** and may be considered after M
 | **Fairness** | System does not disadvantage users based on writing style, language quality, or device type |
 | **Human control** | Maintenance staff retain full authority to override, merge, split, or reclassify issues |
 | **Source attribution** | RAG-retrieved information is distinguished from AI-generated content |
-| **Auditability** | All AI decisions are logged and can be reviewed |
+| **Auditability** | AI decisions, rule triggers, confidence/assessment metadata, and resulting actions can be logged for review. Audit logs must not unnecessarily store personally identifying information. |
