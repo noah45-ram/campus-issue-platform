@@ -53,7 +53,11 @@ init_db()
 # PHOTO EVIDENCE CONFIGURATION
 # ============================================================
 
-UPLOAD_DIR = Path(__file__).resolve().parent / "uploads"
+if os.getenv("VERCEL"):
+    UPLOAD_DIR = Path("/tmp/snapact_uploads")
+else:
+    UPLOAD_DIR = Path(__file__).resolve().parent / "uploads"
+
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_IMAGE_TYPES = {
