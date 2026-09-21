@@ -6,7 +6,7 @@
 
 SnapAct is a campus operations platform that turns everyday observations into actionable maintenance and sustainability responses.
 
-From a **leaking tap** to an **electrical hazard**, SnapAct helps campus users report problems quickly, identifies the issue, checks for safety risks, detects duplicate reports, prioritizes maintenance work, and tracks resolution.
+From a **leaking tap** to an **electrical hazard**, SnapAct helps campus users report problems quickly, identify the issue, check for safety risks, detect duplicate reports, prioritize maintenance work, and track resolution.
 
 Built as part of the **1M1B × IBM SkillsBuild AI + Sustainability Virtual Internship**.
 
