@@ -12,17 +12,32 @@ load_dotenv(find_dotenv())
 
 from ai_service import classify_issue
 from duplicate_detection import find_duplicate_candidate
-from issue_store import (create_issue, get_issue, list_issues, update_issue_status, increment_report_count)
+from issue_store import (
+    create_issue,
+    get_issue,
+    list_issues,
+    update_issue,
+    update_issue_status,
+    increment_report_count,
+    init_db,
+)
 from knowledge_base import search_knowledge
 from priority_rules import calculate_priority
 from safety_rules import assess_safety
 
+
+# ============================================================
+# APPLICATION
+# ============================================================
 
 app = FastAPI(
     title="GreenCampus Sentinel API",
     description="AI-assisted campus sustainability issue reporting platform",
     version="0.1.0",
 )
+
+# Initialize PostgreSQL tables.
+init_db()
 
 
 # ============================================================
@@ -187,7 +202,9 @@ def _init_demo_store():
         update_issue_status(h4_old["id"], "resolved")
 
 
-_init_demo_store()
+# Demo data is only inserted when explicitly enabled.
+if os.getenv("SEED_DEMO_DATA", "false").lower() == "true":
+    _init_demo_store()
 
 
 # ============================================================
@@ -206,7 +223,7 @@ class IssueCreateRequest(BaseModel):
     """
     Kept for compatibility with the existing project structure.
 
-    The actual POST /issues endpoint now uses multipart/form-data
+    The actual POST /issues endpoint uses multipart/form-data
     so that it can receive an optional image.
     """
 
@@ -328,7 +345,6 @@ def analyze_issue(payload: IssueAnalyzeRequest):
         existing_issues=list_issues(),
     )
 
-    # 5. Combined response
     return {
         "status": "ok",
         "classification": classification,
@@ -370,15 +386,13 @@ def report_issue(
     # --------------------------------------------------------
     # 1. PHOTO EVIDENCE
     # --------------------------------------------------------
-    # The image is stored only as supporting evidence.
-    # It is NOT sent to OpenRouter or analyzed by AI.
+
     evidence = save_evidence_image(image)
 
     # --------------------------------------------------------
     # 2. AI CLASSIFICATION
     # --------------------------------------------------------
-    # Text is the only AI input. For photo-only reports, there is
-    # insufficient textual evidence for automated classification.
+
     manual_review_required = False
 
     if clean_description:
@@ -388,6 +402,7 @@ def report_issue(
         )
     else:
         manual_review_required = True
+
         classification = {
             "category": "other",
             "severity": "low",
@@ -402,6 +417,7 @@ def report_issue(
     # --------------------------------------------------------
     # 3. DETERMINISTIC SAFETY ASSESSMENT
     # --------------------------------------------------------
+
     safety = assess_safety(
         description=clean_description,
         category=classification.get("category", ""),
@@ -411,6 +427,7 @@ def report_issue(
     # --------------------------------------------------------
     # 4. DETERMINISTIC DUPLICATE DETECTION
     # --------------------------------------------------------
+
     current_issues = list_issues()
 
     duplicate = find_duplicate_candidate(
@@ -423,6 +440,7 @@ def report_issue(
     # --------------------------------------------------------
     # 5. LOCAL KNOWLEDGE SEARCH
     # --------------------------------------------------------
+
     try:
         knowledge = (
             search_knowledge(
@@ -450,17 +468,17 @@ def report_issue(
     # --------------------------------------------------------
     # 6. DUPLICATE HANDLING
     # --------------------------------------------------------
+
     if duplicate.get("is_duplicate"):
         dup_id = duplicate.get("duplicate_issue_id")
         existing_issue = get_issue(dup_id) if dup_id else None
 
         if existing_issue is None:
-            # Defensive fallback: the candidate disappeared between
-            # duplicate detection and retrieval.
             duplicate["is_duplicate"] = False
             duplicate["reason"] = "Duplicate candidate no longer exists."
+
         else:
-            # The application owns report counting.
+            # Increment persistent report count.
             updated_issue = increment_report_count(dup_id)
 
             # Preserve evidence from every linked report.
@@ -493,15 +511,13 @@ def report_issue(
             ):
                 existing_issue["severity"] = new_severity
 
-            # A critical safety report must be able to upgrade the
-            # existing active issue.
+            # A critical safety report can upgrade the existing issue.
             if safety.get("is_safety_critical"):
                 existing_issue["safety"] = safety
 
             merged_safety = existing_issue.get("safety", safety)
 
-            # Recalculate the real operational priority using the
-            # updated report count. No user-supplied report count.
+            # Recalculate operational priority.
             updated_priority = calculate_priority(
                 safety_assessment=merged_safety,
                 severity=existing_issue.get("severity", "low"),
@@ -512,6 +528,21 @@ def report_issue(
 
             existing_issue["priority"] = updated_priority
             existing_issue["duplicate"] = duplicate
+
+            # Persist all changed fields.
+            persisted_issue = update_issue(
+                dup_id,
+                {
+                    "severity": existing_issue.get("severity", "low"),
+                    "safety": existing_issue.get("safety", {}),
+                    "priority": updated_priority,
+                    "duplicate": duplicate,
+                    "evidence": existing_issue.get("evidence"),
+                },
+            )
+
+            if persisted_issue:
+                existing_issue = persisted_issue
 
             msg = (
                 f"Report linked to existing active issue {dup_id}. "
@@ -535,8 +566,7 @@ def report_issue(
     # --------------------------------------------------------
     # 7. CREATE NEW ISSUE
     # --------------------------------------------------------
-    # Every new issue starts at exactly one report. The user does
-    # not control this value.
+
     priority = calculate_priority(
         safety_assessment=safety,
         severity=classification.get("severity", "low"),
@@ -549,6 +579,7 @@ def report_issue(
         "description": clean_description,
         "location": location or "",
         "category": classification.get("category", "other"),
+        "issue_type": classification.get("issue_type"),
         "severity": classification.get("severity", "low"),
         "safety": safety,
         "priority": priority,
@@ -556,6 +587,8 @@ def report_issue(
         "report_count": 1,
         "evidence": [evidence] if evidence else [],
         "manual_review_required": manual_review_required,
+        "recurrence": recurrence,
+        "affected_area": affected_area,
     }
 
     created = create_issue(new_issue_data)
@@ -587,7 +620,6 @@ def get_evidence(filename: str):
     Only files from the dedicated uploads directory can be served.
     """
 
-    # Prevent path traversal such as ../../some-file
     safe_name = Path(filename).name
     file_path = UPLOAD_DIR / safe_name
 
